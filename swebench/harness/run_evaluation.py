@@ -148,7 +148,8 @@ def run_instance(
         logger.info(f"Git diff before:\n{git_diff_output_before}")
 
         eval_file = Path(log_dir / "eval.sh")
-        eval_file.write_text(test_spec.eval_script)
+        modified_eval_script = '\n'.join([e for e in test_spec.eval_script.splitlines() if not e.startswith('git checkout')])
+        eval_file.write_text(modified_eval_script)
         logger.info(
             f"Eval script for {instance_id} written to {eval_file}; copying to container..."
         )
