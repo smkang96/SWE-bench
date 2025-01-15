@@ -107,12 +107,12 @@ if __name__ == '__main__':
             test_exec_result = 'in-execution error: ' + repr(e)
         test_results[example_data['instance_id']] = {
             EXAMPLE_TEST: {
-                'executable': run_successfully,
+                'executable': ran_successfully,
                 'passed': test_exec_result
             }
         }
         with open(run_id+'.json', 'w') as f:
-            json.dump(test_results)
+            json.dump(test_results, f)
     print('a-ok')
     
     
