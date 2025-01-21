@@ -3,6 +3,7 @@ import os
 import json
 import difflib
 import tqdm
+import argparse
 
 REPO_DIR = './repos/'
 INJECT_ID_STR = 'AUTOINJECTED'
@@ -10,6 +11,8 @@ EXAMPLE_TEST = f'''
 def test_failure_assured_{INJECT_ID_STR}():
     assert False
 '''
+INDENT_EXAMPLE_TEST = '\n'.join('    '+line for line in EXAMPLE_TEST.split('\n'))
+
 MODEL_NAME = 'doctester'
 
 def initialize_repo(repo_name, commit_hash):
@@ -62,46 +65,73 @@ def save_patch_objects(patch_objects, save_path):
             print(json.dumps(patch_obj), file=f)
 
 def run_test_evaluation(save_path, run_id='dev-run'):
-    p = sp.run(['python', '-m', 'swebench.harness.run_evaluation',
+    p = sp.run(['python3.9', '-m', 'swebench.harness.run_evaluation',
                 '--predictions_path', save_path,
                 '--max_workers', '1',
-                '--run_id', 'dev-run'])
+                '--run_id', run_id])
     assert p.returncode == 0, 'test evaluation failed.'
 
 def retrieve_test_results(run_id, instance_id):
     log_dir = os.path.join('logs/run_evaluation', run_id, MODEL_NAME, instance_id)
     test_output = os.path.join(log_dir, 'test_output.txt')
+    injected_test_found = False
     with open(test_output) as f:
         for line in f:
-            if '::' in line and INJECT_ID_STR in line:
-                assert any(res in line for res in ('PASSED', 'FAILED'))
-                return line.split()[0] == 'PASSED'
+            if INJECT_ID_STR in line:
+                injected_test_found = True
+                if '::' in line:
+                    assert any(res in line for res in ('PASSED', 'FAILED'))
+                    return line.split()[0] == 'PASSED'
+                elif ' ... ' in line:
+                    assert any(res in line for res in ('ok', 'ERROR'))
+                    return line.strip().split()[-1] == 'ok'
+                elif line.strip().endswith(' ok') or line.strip().endswith(' [FAIL]'):
+                    assert instance_id.split('__')[0] == 'sympy' # only sure for sympy, need to check elsewise
+                    return line.strip().split()[-1] == 'ok'
         else:
-            raise ValueError(f'Potentially different test framework for {instance_id}')
-                
+            if injected_test_found:
+                raise ValueError(f'Potentially unknown test framework for {instance_id}')
+            else:
+                raise ValueError(f'Injected test not found for {instance_id}')
+
+def run_test(bug_data, injecting_test, run_id):
+    initialize_repo(bug_data['repo'], bug_data['base_commit'])
+    test_file, test_file_content = get_test_file_and_content(
+        os.path.join(REPO_DIR, os.path.basename(bug_data['repo'])), 
+        bug_data['test_patch']
+    )
+    test_diff = get_test_diff(test_file, test_file_content, injecting_test)
+    patch_obj = generate_patch_object(bug_data['instance_id'], test_diff)
+
+    save_path = f'{MODEL_NAME}/example.jsonl'
+    
+    save_patch_objects([patch_obj], f'{MODEL_NAME}/example.jsonl')
+    run_test_evaluation(save_path, run_id)
+    test_exec_result = retrieve_test_results(run_id, example_data['instance_id'])
+    return test_exec_result
+    
         
 if __name__ == '__main__':
     from datasets import load_dataset
-    
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--expr_name', default='test')
+    args = parser.parse_args()
+
     test_bench = load_dataset('princeton-nlp/SWE-bench_Lite', split='test')
     test_results = dict()
+    run_id = args.expr_name
     for example_data in tqdm.tqdm(test_bench):
+        project_name = example_data['instance_id'].split('__')[0]
+        if project_name != 'sympy':
+            continue
+        print(example_data['instance_id'])
         try:
-            initialize_repo(example_data['repo'], example_data['base_commit'])
-            test_file, test_file_content = get_test_file_and_content(
-                os.path.join(REPO_DIR, os.path.basename(example_data['repo'])), 
-                example_data['test_patch']
-            )
-            test_diff = get_test_diff(test_file, test_file_content, EXAMPLE_TEST)
-            patch_obj = generate_patch_object(example_data['instance_id'], test_diff)
-
-            save_path = f'{MODEL_NAME}/example.jsonl'
-            run_id = 'dev-run'
-            
-            save_patch_objects([patch_obj], f'{MODEL_NAME}/example.jsonl')
-            run_test_evaluation(save_path, run_id)
+            if project_name in ('django',):
+                test_exec_result = run_test(example_data, INDENT_EXAMPLE_TEST, run_id)
+            else:
+                test_exec_result = run_test(example_data, EXAMPLE_TEST, run_id)
             ran_successfully = True
-            test_exec_result = retrieve_test_results(run_id, example_data['instance_id'])
         except Exception as e:
             ran_successfully = False
             test_exec_result = 'in-execution error: ' + repr(e)
